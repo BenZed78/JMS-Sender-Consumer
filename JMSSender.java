@@ -17,7 +17,7 @@ public class JMSSender {
             // JNDI-Einstellungen für WebLogic
             Properties props = new Properties();
             props.put(Context.INITIAL_CONTEXT_FACTORY, "weblogic.jndi.WLInitialContextFactory");
-            props.put(Context.PROVIDER_URL, config.getProviderUrl()); // Korrigiert: Bindestrich zu Punkt
+            props.put(Context.PROVIDER_URL, config.getProviderUrl());
             props.put(Context.SECURITY_PRINCIPAL, config.getSecurityPrincipal());
             props.put(Context.SECURITY_CREDENTIALS, config.getSecurityCredentials());
 
@@ -28,36 +28,59 @@ public class JMSSender {
             ConnectionFactory connectionFactory = (ConnectionFactory) ctx.lookup(config.getJmsConnectionFactory());
             Queue queue = (Queue) ctx.lookup(config.getJmsQueue());
 
-            // JMS-Verbindung und Session erstellen
-            try (Connection connection = connectionFactory.createConnection();
-                 Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
+            // JMS-Verbindung erstellen
+            try (Connection connection = connectionFactory.createConnection()) {
+                // Verbindung starten
+                connection.start();
 
-                // Nachrichtensender erstellen
-                MessageProducer producer = session.createProducer(queue);
-
-                // Nachrichten mit variabler Größe senden
+                // Anzahl der Threads und Nachrichten pro Thread
+                int threadCount = config.getThreadCount();
                 int messageCount = config.getMessageCount();
-                int minSizeMB = config.getMinSizeMB();
-                int maxSizeMB = config.getMaxSizeMB();
-                long pauseMs = config.getPauseMs();
+                int messagesPerThread = messageCount / threadCount;
+                int remainingMessages = messageCount % threadCount; // Rest für den ersten Thread
 
-                for (int i = 1; i <= messageCount; i++) {
-                    // Zufällige Nachrichtengröße zwischen minSizeMB und maxSizeMB generieren
-                    int sizeMB = minSizeMB + RANDOM.nextInt(maxSizeMB - minSizeMB + 1);
-                    int sizeBytes = sizeMB * BYTES_PER_MB;
+                // Threads starten
+                Thread[] threads = new Thread[threadCount];
+                for (int t = 0; t < threadCount; t++) {
+                    final int threadId = t + 1;
+                    final int threadMessages = (t == 0) ? messagesPerThread + remainingMessages : messagesPerThread;
+                    threads[t] = new Thread(() -> {
+                        try (Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+                             MessageProducer producer = session.createProducer(queue)) {
+                            int minSizeMB = config.getMinSizeMB();
+                            int maxSizeMB = config.getMaxSizeMB();
+                            long pauseMs = config.getPauseMs();
 
-                    // BytesMessage erstellen
-                    BytesMessage message = session.createBytesMessage();
-                    byte[] data = new byte[sizeBytes];
-                    RANDOM.nextBytes(data); // Fülle das Array mit Zufallsdaten
-                    message.writeBytes(data);
+                            for (int i = 1; i <= threadMessages; i++) {
+                                // Zufällige Nachrichtengröße generieren
+                                int sizeMB = minSizeMB + RANDOM.nextInt(maxSizeMB - minSizeMB + 1);
+                                int sizeBytes = sizeMB * BYTES_PER_MB;
 
-                    // Nachricht senden
-                    producer.send(message);
-                    System.out.printf("Nachricht %d gesendet: Größe = %d MB (%d Bytes)%n", i, sizeMB, sizeBytes);
+                                // BytesMessage erstellen
+                                BytesMessage message = session.createBytesMessage();
+                                byte[] data = new byte[sizeBytes];
+                                RANDOM.nextBytes(data);
+                                message.writeBytes(data);
 
-                    // Pause zwischen Nachrichten
-                    Thread.sleep(pauseMs);
+                                // Nachricht senden
+                                producer.send(message);
+                                System.out.printf("Thread %d: Nachricht %d gesendet: Größe = %d MB (%d Bytes)%n",
+                                        threadId, i, sizeMB, sizeBytes);
+
+                                // Pause zwischen Nachrichten
+                                Thread.sleep(pauseMs);
+                            }
+                        } catch (Exception e) {
+                            System.err.println("Fehler in Thread " + threadId + ": " + e.getMessage());
+                            e.printStackTrace();
+                        }
+                    });
+                    threads[t].start();
+                }
+
+                // Warte auf das Beenden aller Threads
+                for (Thread thread : threads) {
+                    thread.join();
                 }
 
                 System.out.println("Alle Nachrichten gesendet.");
@@ -114,5 +137,9 @@ class Config {
 
     public long getPauseMs() {
         return Long.parseLong(properties.getProperty("sender.pause.ms", "100"));
+    }
+
+    public int getThreadCount() {
+        return Integer.parseInt(properties.getProperty("sender.thread.count", "1"));
     }
 }
