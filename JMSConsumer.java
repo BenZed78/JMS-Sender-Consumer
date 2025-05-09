@@ -24,38 +24,67 @@ public class JMSConsumer {
             ConnectionFactory connectionFactory = (ConnectionFactory) ctx.lookup(config.getJmsConnectionFactory());
             Queue queue = (Queue) ctx.lookup(config.getJmsQueue());
 
-            // JMS-Verbindung und Session erstellen
-            try (Connection connection = connectionFactory.createConnection();
-                 Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-                 MessageConsumer consumer = session.createConsumer(queue)) {
-
+            // JMS-Verbindung erstellen
+            try (Connection connection = connectionFactory.createConnection()) {
                 // Verbindung starten
                 connection.start();
-                System.out.println("Warte auf Nachrichten...");
 
-                // Endlosschleife zum Konsumieren und Verwerfen von Nachrichten
-                while (true) {
-                    Message message = consumer.receive(5000); // Erhöhtes Timeout: 5 Sekunden
-                    if (message != null) {
-                        if (message instanceof BytesMessage) {
-                            BytesMessage bytesMessage = (BytesMessage) message;
-                            long sizeBytes = bytesMessage.getBodyLength();
-                            try {
-                                // Nachricht in Chunks lesen
-                                readMessageInChunks(bytesMessage);
-                                System.out.printf("Nachricht empfangen und verworfen: Größe = %.2f MB (%d Bytes)%n",
-                                        sizeBytes / (double) Config.BYTES_PER_MB, sizeBytes);
-                            } catch (JMSException e) {
-                                System.err.printf("Fehler beim Verarbeiten der Nachricht (Größe: %d Bytes): %s%n",
-                                        sizeBytes, e.getMessage());
-                                throw e; // Fehler weiterleiten, um Schleife nicht zu blockieren
+                // Anzahl der Consumer-Threads
+                int threadCount = config.getConsumerThreadCount();
+                Thread[] threads = new Thread[threadCount];
+
+                // Threads starten
+                for (int t = 0; t < threadCount; t++) {
+                    final int threadId = t + 1;
+                    threads[t] = new Thread(() -> {
+                        try (Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+                             MessageConsumer consumer = session.createConsumer(queue)) {
+                            System.out.println("Consumer-Thread " + threadId + ": Warte auf Nachrichten...");
+                            consumer.setMessageListener(message -> {
+                                try {
+                                    if (message instanceof BytesMessage) {
+                                        BytesMessage bytesMessage = (BytesMessage) message;
+                                        long sizeBytes = bytesMessage.getBodyLength();
+                                        readMessageInChunks(bytesMessage);
+                                        System.out.printf("Consumer-Thread %d: Nachricht empfangen und verworfen: Größe = %.2f MB (%d Bytes)%n",
+                                                threadId, sizeBytes / (double) Config.BYTES_PER_MB, sizeBytes);
+                                    } else {
+                                        System.out.println("Consumer-Thread " + threadId + ": Nachricht empfangen und verworfen: " + message);
+                                    }
+                                    // Nachricht wird automatisch durch AUTO_ACKNOWLEDGE gelöscht
+                                } catch (JMSException e) {
+                                    System.err.printf("Consumer-Thread %d: Fehler beim Verarbeiten der Nachricht: %s%n",
+                                            threadId, e.getMessage());
+                                }
+                            });
+
+                            // Halte den Thread am Laufen, bis er unterbrochen wird
+                            while (!Thread.interrupted()) {
+                                try {
+                                    Thread.sleep(100); // Kurze Pause, um CPU-Last zu reduzieren
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt(); // Interrupt-Status wiederherstellen
+                                    break;
+                                }
                             }
-                        } else {
-                            System.out.println("Nachricht empfangen und verworfen: " + message);
+                        } catch (Exception e) {
+                            System.err.println("Fehler in Consumer-Thread " + threadId + ": " + e.getMessage());
+                            e.printStackTrace();
                         }
-                        // Nachricht wird automatisch durch AUTO_ACKNOWLEDGE gelöscht
-                    }
+                    });
+                    threads[t].start();
                 }
+
+                // Warte auf Benutzereingabe, um das Programm zu beenden
+                System.out.println("Drücke Enter, um die Consumer-Threads zu beenden...");
+                System.in.read();
+                for (Thread thread : threads) {
+                    thread.interrupt();
+                }
+                for (Thread thread : threads) {
+                    thread.join();
+                }
+                System.out.println("Alle Consumer-Threads beendet.");
             }
         } catch (Exception e) {
             System.err.println("Fehler beim Empfangen der Nachricht: " + e.getMessage());
@@ -103,5 +132,9 @@ class Config {
 
     public String getJmsQueue() {
         return properties.getProperty("jms.queue");
+    }
+
+    public int getConsumerThreadCount() {
+        return Integer.parseInt(properties.getProperty("consumer.thread.count", "1"));
     }
 }
