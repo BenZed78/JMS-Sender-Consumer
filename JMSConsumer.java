@@ -3,8 +3,13 @@ import javax.naming.Context;
 import javax.naming.InitialContext;
 import java.io.FileInputStream;
 import java.util.Properties;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class JMSConsumer {
+    private static final AtomicLong totalMessages = new AtomicLong(0);
+    private static final AtomicLong totalBytes = new AtomicLong(0);
+    private static final long startTime = System.nanoTime();
+
     public static void main(String[] args) {
         try {
             // Konfiguration laden
@@ -48,8 +53,18 @@ public class JMSConsumer {
                                         readMessageInChunks(bytesMessage);
                                         System.out.printf("Consumer-Thread %d: Nachricht empfangen und verworfen: Größe = %.2f MB (%d Bytes)%n",
                                                 threadId, sizeBytes / (double) Config.BYTES_PER_MB, sizeBytes);
+
+                                        // Statistiken aktualisieren
+                                        long currentMessages = totalMessages.incrementAndGet();
+                                        long currentBytes = totalBytes.addAndGet(sizeBytes);
+
+                                        // Statistiken periodisch ausgeben
+                                        if (currentMessages % config.getStatsInterval() == 0) {
+                                            logStatistics(currentMessages, currentBytes);
+                                        }
                                     } else {
                                         System.out.println("Consumer-Thread " + threadId + ": Nachricht empfangen und verworfen: " + message);
+                                        totalMessages.incrementAndGet();
                                     }
                                     // Nachricht wird automatisch durch AUTO_ACKNOWLEDGE gelöscht
                                 } catch (JMSException e) {
@@ -84,6 +99,9 @@ public class JMSConsumer {
                 for (Thread thread : threads) {
                     thread.join();
                 }
+
+                // Abschließende Statistiken ausgeben
+                logStatistics(totalMessages.get(), totalBytes.get());
                 System.out.println("Alle Consumer-Threads beendet.");
             }
         } catch (Exception e) {
@@ -99,6 +117,20 @@ public class JMSConsumer {
         while ((bytesRead = message.readBytes(buffer)) != -1) {
             // Daten verwerfen (wir lesen nur, um die Nachricht zu konsumieren)
         }
+    }
+
+    // Methode zum Protokollieren der Statistiken
+    private static void logStatistics(long messages, long bytes) {
+        long elapsedMs = (System.nanoTime() - startTime) / 1_000_000;
+        Runtime runtime = Runtime.getRuntime();
+        long usedMemory = runtime.totalMemory() - runtime.freeMemory();
+        double messagesPerSecond = elapsedMs > 0 ? messages * 1000.0 / elapsedMs : 0;
+        double mbPerSecond = elapsedMs > 0 ? (bytes / (double) Config.BYTES_PER_MB) * 1000.0 / elapsedMs : 0;
+
+        System.out.printf(
+                "Statistik: %d Nachrichten, %.2f MB gesamt, %.2f Nachrichten/Sek, %.2f MB/Sek, Speicher: %.2f MB verwendet%n",
+                messages, bytes / (double) Config.BYTES_PER_MB, messagesPerSecond, mbPerSecond,
+                usedMemory / (double) Config.BYTES_PER_MB);
     }
 }
 
@@ -136,5 +168,9 @@ class Config {
 
     public int getConsumerThreadCount() {
         return Integer.parseInt(properties.getProperty("consumer.thread.count", "1"));
+    }
+
+    public int getStatsInterval() {
+        return Integer.parseInt(properties.getProperty("consumer.stats.interval", "100"));
     }
 }
